@@ -1,0 +1,5 @@
+{
+  "name": "JellySort Renamer",
+  "description": "A smart tool to simulate and generate scripts for renaming TV series files for Jellyfin/Plex compatibility using AI pattern matching.",
+  "requestFramePermissions": []
+}

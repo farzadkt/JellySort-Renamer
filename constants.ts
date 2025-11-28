@@ -1,459 +1,495 @@
 
-export const PYTHON_SCRIPT_TEMPLATE = `import os
+export const PYTHON_SCRIPT_TEMPLATE = `import sys
+import os
 import re
 import shutil
-import sys
-import time
 import json
 import datetime
-import threading
-import tkinter as tk
-from tkinter import filedialog, messagebox, scrolledtext, ttk
+from pathlib import Path
 
-# --- CONFIGURATION & CONSTANTS ---
-DEFAULT_CONFIG = {
-    "VIDEO_EXTENSIONS": ['.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.mpg', '.mpeg', '.iso'],
-    "SUBTITLE_EXTENSIONS": ['.srt', '.sub', '.idx', '.ass', '.vtt'],
-    "CONFLICT_ACTION": "skip",  # options: skip, overwrite, rename
-    "DRY_RUN": False
-}
+# Dependency Check
+try:
+    from PyQt6.QtWidgets import (QApplication, QMainWindow, QWidget, QVBoxLayout, QHBoxLayout, 
+                                 QPushButton, QLabel, QLineEdit, QTableWidget, QTableWidgetItem, 
+                                 QHeaderView, QFileDialog, QTabWidget, QMessageBox, QProgressBar,
+                                 QComboBox, QCheckBox, QSplitter, QFrame)
+    from PyQt6.QtCore import Qt, QThread, pyqtSignal, QSize
+    from PyQt6.QtGui import QColor, QIcon, QFont, QPalette
+except ImportError:
+    print("CRITICAL ERROR: PyQt6 is not installed.")
+    print("Please run: pip install PyQt6")
+    input("Press Enter to exit...")
+    sys.exit(1)
 
-ILLEGAL_CHARS = r'[<>:"/\\\\|?*]'
+# --- CONSTANTS ---
+APP_NAME = "JellySort Modern"
+VERSION = "2.0"
+BACKUP_DIR_NAME = ".jellysort_backups"
+VIDEO_EXTS = {'.mkv', '.mp4', '.avi', '.mov', '.wmv', '.m4v', '.mpg', '.mpeg', '.iso'}
+SUB_EXTS = {'.srt', '.sub', '.idx', '.ass', '.vtt'}
 
-# --- LOGGING & GUI HELPERS ---
-class Logger:
-    def __init__(self, text_widget):
-        self.widget = text_widget
+# --- THEMES & STYLES ---
+DARK_STYLESHEET = """
+QMainWindow { background-color: #1e1e1e; color: #f0f0f0; }
+QWidget { background-color: #1e1e1e; color: #f0f0f0; font-family: 'Segoe UI', sans-serif; font-size: 14px; }
+QTableWidget { background-color: #252526; gridline-color: #3e3e42; border: 1px solid #3e3e42; }
+QHeaderView::section { background-color: #333337; padding: 4px; border: 1px solid #3e3e42; color: #cccccc; }
+QLineEdit { background-color: #3c3c3c; border: 1px solid #555; padding: 5px; color: white; border-radius: 4px; }
+QLineEdit:focus { border: 1px solid #007acc; }
+QPushButton { background-color: #0e639c; color: white; border: none; padding: 8px 16px; border-radius: 4px; }
+QPushButton:hover { background-color: #1177bb; }
+QPushButton:pressed { background-color: #094771; }
+QPushButton#Secondary { background-color: #3e3e42; }
+QPushButton#Secondary:hover { background-color: #4e4e52; }
+QProgressBar { border: 1px solid #3e3e42; border-radius: 4px; text-align: center; }
+QProgressBar::chunk { background-color: #007acc; }
+"""
 
-    def log(self, message, color="black"):
-        if not self.widget: 
-            print(message)
-            return
+# --- LOGIC HELPERS ---
+class FileScanner:
+    def __init__(self, root, mode="Series", template="{ShowName} - S{s:02}E{e:02}"):
+        self.root = root
+        self.mode = mode
+        self.template = template
+        self.scan_results = [] # List of dicts
+
+    def clean_name(self, name):
+        return re.sub(r'[<>:"/\\\\|?*]', '', name).strip()
+
+    def detect_series(self, filename):
+        # Patterns
+        patterns = [
+            r'[Ss](\\d{1,2})[\\.\\s-]?[Ee](\\d{1,3})', # S01E01
+            r'(\\d{1,2})[xX](\\d{1,3})',              # 1x01
+        ]
         
-        timestamp = datetime.datetime.now().strftime("%H:%M:%S")
-        self.widget.configure(state='normal')
-        self.widget.insert(tk.END, f"[{timestamp}] ", "timestamp")
-        self.widget.insert(tk.END, message + "\\n", color)
-        self.widget.see(tk.END)
-        self.widget.configure(state='disabled')
+        name, ext = os.path.splitext(filename)
+        if ext.lower() not in VIDEO_EXTS: return None
 
-# --- MANIFEST / UNDO SYSTEM ---
-class ManifestManager:
-    def __init__(self, root_folder):
-        self.root = root_folder
-        self.backup_dir = os.path.join(root_folder, ".jellysort_backups")
-
-    def create_manifest(self, operations):
-        """
-        operations: list of dicts {'src': path, 'dst': path}
-        """
-        if not operations: return None
+        for pat in patterns:
+            m = re.search(pat, name)
+            if m:
+                return int(m.group(1)), int(m.group(2))
         
-        if not os.path.exists(self.backup_dir):
-            os.makedirs(self.backup_dir)
+        # Fallback: 101 (exclude years)
+        m = re.search(r'(?<!\\d)(\\d{1,2})(\\d{2})(?!\\d)', name)
+        if m:
+            s, e = int(m.group(1)), int(m.group(2))
+            if not (1900 <= int(f"{s}{e}") <= 2030):
+                return s, e
+        return None
 
+    def detect_movie(self, filename):
+        name, ext = os.path.splitext(filename)
+        if ext.lower() not in VIDEO_EXTS: return None
+        
+        # Look for Year (19xx or 20xx)
+        m = re.search(r'^(.*?)[\\.\\s\\(\\)\\[\\]\\-_]+(19\\d{2}|20\\d{2})', name)
+        if m:
+            title = m.group(1).replace('.', ' ').strip()
+            year = m.group(2)
+            return title, year
+        return None
+
+    def scan(self):
+        self.scan_results = []
+        root_abs = os.path.abspath(self.root)
+        root_name = os.path.basename(root_abs)
+        
+        # Clean show name from root folder
+        show_name = re.sub(r'\\(\\d{4}\\)', '', root_name).replace('.', ' ').replace('_', ' ').strip().title()
+
+        for current_root, _, files in os.walk(root_abs):
+            if BACKUP_DIR_NAME in current_root: continue
+            
+            for f in files:
+                full_src = os.path.join(current_root, f)
+                _, ext = os.path.splitext(f)
+                
+                new_name = None
+                new_folder = None
+                
+                if self.mode == "Series":
+                    res = self.detect_series(f)
+                    if res:
+                        s, e = res
+                        # Apply Template
+                        try:
+                            # Basic format implementation
+                            # Supported: {ShowName}, {s}, {e}, {s:02}, {e:02}
+                            # Python f-string logic replacement
+                            name_part = self.template.replace("{ShowName}", show_name)
+                            # Regex replace for formatting specific tokens like {s:02} is hard dynamically,
+                            # so we do simple replacement logic
+                            final_n = name_part.replace("{s}", str(s)).replace("{e}", str(e))
+                            final_n = final_n.replace("{s:02}", f"{s:02}").replace("{e:02}", f"{e:02}")
+                            
+                            new_name = f"{final_n}{ext}"
+                            new_folder = f"Season {s:02}"
+                        except Exception:
+                            new_name = "Template Error"
+                
+                elif self.mode == "Movies":
+                    res = self.detect_movie(f)
+                    if res:
+                        title, year = res
+                        t_clean = self.clean_name(title)
+                        
+                        # Simple movie template: {Title} ({Year})
+                        # We can expand this later if needed
+                        new_name = f"{t_clean} ({year}){ext}"
+                        new_folder = f"{t_clean} ({year})"
+
+                if new_name:
+                    full_dst_folder = os.path.join(root_abs, new_folder) if self.mode == "Series" else os.path.join(root_abs, "Movies", new_folder)
+                    full_dst = os.path.join(full_dst_folder, new_name)
+                    
+                    self.scan_results.append({
+                        "original_name": f,
+                        "src": full_src,
+                        "dst": full_dst,
+                        "folder": new_folder,
+                        "new_name": new_name,
+                        "status": "Pending"
+                    })
+                    
+                    # Scan for subtitles
+                    self.scan_subtitles(full_src, full_dst_folder, new_name)
+
+    def scan_subtitles(self, video_src, dst_folder, video_new_name):
+        src_dir = os.path.dirname(video_src)
+        base = os.path.splitext(os.path.basename(video_src))[0]
+        dst_base = os.path.splitext(video_new_name)[0]
+        
+        for f in os.listdir(src_dir):
+            if f.startswith(base) and f != os.path.basename(video_src):
+                _, ext = os.path.splitext(f)
+                if ext.lower() in SUB_EXTS:
+                    suffix = f[len(base):] # e.g. .en.srt
+                    sub_new_name = f"{dst_base}{suffix}"
+                    
+                    self.scan_results.append({
+                        "original_name": f,
+                        "src": os.path.join(src_dir, f),
+                        "dst": os.path.join(dst_folder, sub_new_name),
+                        "folder": "[Subtitle]",
+                        "new_name": sub_new_name,
+                        "status": "Pending"
+                    })
+
+# --- WORKER THREADS ---
+class ScanWorker(QThread):
+    finished = pyqtSignal(list)
+    
+    def __init__(self, scanner):
+        super().__init__()
+        self.scanner = scanner
+
+    def run(self):
+        self.scanner.scan()
+        self.finished.emit(self.scanner.scan_results)
+
+class ApplyWorker(QThread):
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal(str) # Path to manifest
+    
+    def __init__(self, operations, root):
+        super().__init__()
+        self.operations = operations
+        self.root = root
+
+    def run(self):
+        backup_dir = os.path.join(self.root, BACKUP_DIR_NAME)
+        if not os.path.exists(backup_dir): os.makedirs(backup_dir)
+        
         timestamp = datetime.datetime.now().strftime("%Y%m%d_%H%M%S")
-        filename = f"backup_{timestamp}.json"
-        filepath = os.path.join(self.backup_dir, filename)
-
-        data = {
+        manifest_path = os.path.join(backup_dir, f"backup_{timestamp}.json")
+        
+        manifest_data = {
             "timestamp": timestamp,
             "root": self.root,
-            "operations": operations
+            "ops": []
         }
-
-        with open(filepath, 'w', encoding='utf-8') as f:
-            json.dump(data, f, indent=4)
         
-        return filepath
-
-    @staticmethod
-    def load_manifest(filepath):
-        with open(filepath, 'r', encoding='utf-8') as f:
-            return json.load(f)
-
-# --- CORE LOGIC ---
-class OrganizerLogic:
-    def __init__(self, logger, config):
-        self.logger = logger
-        self.config = config
-        self.pending_ops = [] # List of {'src', 'dst', 'type'}
-
-    def sanitize_name(self, name):
-        return re.sub(ILLEGAL_CHARS, '', name).strip()
-
-    def get_unique_filename(self, target_path):
-        """ Handles conflict by appending (1), (2) etc. """
-        if not os.path.exists(target_path):
-            return target_path
-        
-        base, ext = os.path.splitext(target_path)
-        counter = 1
-        while os.path.exists(f"{base} ({counter}){ext}"):
-            counter += 1
-        return f"{base} ({counter}){ext}"
-
-    def plan_move(self, src, dst_folder, new_filename):
-        dst_path = os.path.join(dst_folder, new_filename)
-        
-        # Conflict handling
-        if os.path.exists(dst_path):
-            action = self.config["CONFLICT_ACTION"]
-            if os.path.abspath(src) == os.path.abspath(dst_path):
-                return # Same file
-            
-            if action == "skip":
-                self.logger.log(f"Skipping (Exists): {os.path.basename(src)}", "orange")
-                return
-            elif action == "overwrite":
-                pass # Proceed, will overwrite
-            elif action == "rename":
-                dst_path = self.get_unique_filename(dst_path)
-        
-        self.pending_ops.append({
-            "src": src,
-            "dst": dst_path,
-            "type": "video"
-        })
-
-        # Handle Sidecar Files (Subtitles, etc)
-        self.plan_sidecars(src, dst_folder, new_filename)
-
-    def plan_sidecars(self, video_src, dst_folder, video_new_name):
-        src_dir = os.path.dirname(video_src)
-        src_basename = os.path.splitext(os.path.basename(video_src))[0]
-        
-        # Video new name without extension
-        dst_basename = os.path.splitext(video_new_name)[0]
-
-        # Scan folder for matching starts
-        try:
-            for f in os.listdir(src_dir):
-                if f == os.path.basename(video_src): continue
-                
-                # Check if it starts with the video name
-                if f.startswith(src_basename):
-                    # Check extension
-                    _, ext = os.path.splitext(f)
-                    if ext.lower() in self.config["SUBTITLE_EXTENSIONS"]:
-                        # Extract suffix (e.g. ".en.srt" or just ".srt")
-                        # If filename was "Movie.mkv" and sub is "Movie.en.srt", suffix is ".en.srt"
-                        # Be careful if src_basename is "Movie"
-                        suffix = f[len(src_basename):]
-                        
-                        new_sub_name = dst_basename + suffix
-                        new_sub_path = os.path.join(dst_folder, new_sub_name)
-                        
-                        self.pending_ops.append({
-                            "src": os.path.join(src_dir, f),
-                            "dst": new_sub_path,
-                            "type": "subtitle"
-                        })
-        except Exception as e:
-            self.logger.log(f"Error scanning subtitles: {e}", "red")
-
-    def execute_ops(self):
-        if not self.pending_ops:
-            self.logger.log("No changes detected.", "blue")
-            return
-
-        # 1. Create Manifest
-        # Assuming all ops are in the same root mostly, but lets verify
-        # We pick the root of the first op for storage location
-        first_root = os.path.dirname(os.path.dirname(self.pending_ops[0]['src']))
-        manifest_mgr = ManifestManager(first_root)
-        
-        if not self.config["DRY_RUN"]:
-            manifest_path = manifest_mgr.create_manifest(self.pending_ops)
-            if manifest_path:
-                self.logger.log(f"Backup manifest created: {os.path.basename(manifest_path)}", "green")
-
-        # 2. Execute
-        success_count = 0
-        for op in self.pending_ops:
+        total = len(self.operations)
+        for i, op in enumerate(self.operations):
             src, dst = op['src'], op['dst']
             
             try:
-                if self.config["DRY_RUN"]:
-                    self.logger.log(f"[DRY RUN] Move: {os.path.basename(src)} -> {dst}", "blue")
-                else:
-                    # Create dirs
-                    target_dir = os.path.dirname(dst)
-                    if not os.path.exists(target_dir):
-                        os.makedirs(target_dir)
-                    
-                    # Overwrite check done in plan_move, but robust shutil.move handles basic overwrite
-                    if os.path.exists(dst) and self.config["CONFLICT_ACTION"] == "overwrite":
-                        os.remove(dst)
-                        
-                    shutil.move(src, dst)
-                    self.logger.log(f"Moved: {os.path.basename(src)}", "green")
-                success_count += 1
-            except Exception as e:
-                self.logger.log(f"Failed to move {os.path.basename(src)}: {e}", "red")
-
-        self.logger.log(f"Processing Complete. {success_count} files processed.", "black")
-        self.pending_ops.clear()
-
-class SeriesLogic(OrganizerLogic):
-    def run(self, root_path):
-        root_path = os.path.abspath(root_path)
-        folder_name = os.path.basename(root_path)
-        
-        # Clean Show Name
-        show_name = re.sub(r'\\(\\d{4}\\)', '', folder_name)
-        show_name = show_name.replace('.', ' ').replace('_', ' ')
-        show_name = ' '.join(show_name.split()).title()
-        show_name = self.sanitize_name(show_name)
-
-        self.logger.log(f"Scanning Series: {show_name}...", "blue")
-        
-        for current_root, dirs, files in os.walk(root_path):
-            # Skip backup folders
-            if ".jellysort_backups" in current_root: continue
-
-            for filename in files:
-                name, ext = os.path.splitext(filename)
-                if ext.lower() not in self.config["VIDEO_EXTENSIONS"]: continue
-
-                # Match Patterns
-                season, episode = None, None
+                # Create Folder
+                os.makedirs(os.path.dirname(dst), exist_ok=True)
                 
-                # Pattern 1: S01E01
-                m = re.search(r'[Ss](\\d{1,2})[\\.\\s-]?[Ee](\\d{1,3})', filename, re.IGNORECASE)
-                if m:
-                    season, episode = int(m.group(1)), int(m.group(2))
+                # Conflict Handling (Simple Rename)
+                if os.path.exists(dst) and os.path.abspath(src) != os.path.abspath(dst):
+                    base, ext = os.path.splitext(dst)
+                    dst = f"{base}_copy{ext}"
+
+                if os.path.abspath(src) != os.path.abspath(dst):
+                    shutil.move(src, dst)
+                    manifest_data["ops"].append({"src": src, "dst": dst})
+                    self.progress.emit(int((i+1)/total * 100), f"Moved: {os.path.basename(dst)}")
                 else:
-                    # Pattern 2: 1x01
-                    m = re.search(r'(\\d{1,2})[xX](\\d{1,3})', filename)
-                    if m:
-                        season, episode = int(m.group(1)), int(m.group(2))
-                    else:
-                        # Pattern 3: 101 (exclude years)
-                        m = re.search(r'(?<!\\d)(\\d{1,2})(\\d{2})(?!\\d)', filename)
-                        if m:
-                            s, e = int(m.group(1)), int(m.group(2))
-                            if not (1900 <= int(f"{s}{e}") <= 2030):
-                                season, episode = s, e
-
-                if season is not None:
-                    new_name = f"{show_name} - S{season:02d}E{episode:02d}{ext}"
-                    folder_name = f"Season {season:02d}"
-                    self.plan_move(
-                        os.path.join(current_root, filename),
-                        os.path.join(root_path, folder_name),
-                        new_name
-                    )
-
-        self.execute_ops()
-
-class MovieLogic(OrganizerLogic):
-    def run(self, root_path):
-        self.logger.log(f"Scanning Movies in: {root_path}...", "blue")
-        
-        for current_root, dirs, files in os.walk(root_path):
-            if ".jellysort_backups" in current_root: continue
-
-            for filename in files:
-                name, ext = os.path.splitext(filename)
-                if ext.lower() not in self.config["VIDEO_EXTENSIONS"]: continue
-
-                # Match "Title (Year)" or "Title.Year"
-                # Look for Year
-                m = re.search(r'^(.*?)[\\.\\s\\(\\)\\[\\]\\-_]+(19\\d{2}|20\\d{2})', name)
-                if m:
-                    raw_title = m.group(1)
-                    year = m.group(2)
+                    self.progress.emit(int((i+1)/total * 100), "Skipped (Same File)")
                     
-                    title = raw_title.replace('.', ' ').strip()
-                    title = self.sanitize_name(title)
+            except Exception as e:
+                print(f"Error moving {src}: {e}")
+        
+        # Save Manifest
+        with open(manifest_path, 'w') as f:
+            json.dump(manifest_data, f, indent=4)
+            
+        self.finished.emit(manifest_path)
+
+class UndoWorker(QThread):
+    progress = pyqtSignal(int, str)
+    finished = pyqtSignal()
+    
+    def __init__(self, manifest_path):
+        super().__init__()
+        self.manifest_path = manifest_path
+
+    def run(self):
+        try:
+            with open(self.manifest_path, 'r') as f:
+                data = json.load(f)
+            
+            ops = data.get("ops", [])
+            total = len(ops)
+            
+            # Reverse ops
+            for i, op in enumerate(reversed(ops)):
+                src, dst = op['src'], op['dst'] # src was original location
+                
+                if os.path.exists(dst):
+                    os.makedirs(os.path.dirname(src), exist_ok=True)
+                    try:
+                        shutil.move(dst, src)
+                        self.progress.emit(int((i+1)/total * 100), f"Restored: {os.path.basename(src)}")
+                    except Exception as e:
+                        pass
+                else:
+                    self.progress.emit(int((i+1)/total * 100), f"Missing: {os.path.basename(dst)}")
                     
-                    if title:
-                        new_folder = f"{title} ({year})"
-                        new_name = f"{title} ({year}){ext}"
-                        
-                        self.plan_move(
-                            os.path.join(current_root, filename),
-                            os.path.join(root_path, "Movies", new_folder),
-                            new_name
-                        )
-        
-        self.execute_ops()
+            self.finished.emit()
+            
+        except Exception as e:
+            print(f"Undo Error: {e}")
+            self.finished.emit()
 
-# --- GUI APPLICATION ---
-class JellySortApp:
-    def __init__(self, root):
-        self.root = root
-        self.root.title("JellySort Manager")
-        self.root.geometry("700x600")
+# --- MAIN GUI ---
+class MainWindow(QMainWindow):
+    def __init__(self):
+        super().__init__()
+        self.setWindowTitle(f"{APP_NAME} v{VERSION}")
+        self.resize(1000, 700)
+        self.items = []
+        self.current_manifest = None
         
-        self.config = DEFAULT_CONFIG.copy()
+        self.setup_ui()
+        self.apply_theme()
+
+    def apply_theme(self):
+        self.setStyleSheet(DARK_STYLESHEET)
+
+    def setup_ui(self):
+        main_widget = QWidget()
+        self.setCentralWidget(main_widget)
+        layout = QVBoxLayout(main_widget)
+        layout.setContentsMargins(10, 10, 10, 10)
+
+        # 1. Top Bar (Config)
+        config_frame = QFrame()
+        config_frame.setObjectName("Card")
+        top_layout = QHBoxLayout(config_frame)
         
-        # Styling
-        style = ttk.Style()
-        style.theme_use('clam')
-        
-        self.create_widgets()
-
-    def create_widgets(self):
-        # Notebook (Tabs)
-        self.notebook = ttk.Notebook(self.root)
-        self.notebook.pack(expand=True, fill='both', padx=10, pady=5)
-        
-        # Tab 1: Organize
-        self.tab_org = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_org, text=' Organize ')
-        self.build_organize_tab(self.tab_org)
-        
-        # Tab 2: Settings
-        self.tab_set = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_set, text=' Settings ')
-        self.build_settings_tab(self.tab_set)
-
-        # Tab 3: Undo / Restore
-        self.tab_undo = ttk.Frame(self.notebook)
-        self.notebook.add(self.tab_undo, text=' Undo / Restore ')
-        self.build_undo_tab(self.tab_undo)
-
-        # Logger (Bottom)
-        lbl_log = ttk.Label(self.root, text="Activity Log:")
-        lbl_log.pack(anchor='w', padx=10, pady=(5,0))
-        
-        self.log_widget = scrolledtext.ScrolledText(self.root, height=10, state='disabled')
-        self.log_widget.pack(fill='x', padx=10, pady=5)
-        self.log_widget.tag_config("timestamp", foreground="gray")
-        self.log_widget.tag_config("green", foreground="green")
-        self.log_widget.tag_config("red", foreground="red")
-        self.log_widget.tag_config("blue", foreground="blue")
-        self.log_widget.tag_config("orange", foreground="#FFA500")
-
-        self.logger = Logger(self.log_widget)
-
-    def build_organize_tab(self, parent):
-        frame = ttk.Frame(parent, padding=20)
-        frame.pack(fill='both', expand=True)
-
         # Mode Selection
-        lbl = ttk.Label(frame, text="Select Mode:")
-        lbl.pack(anchor='w')
+        self.combo_mode = QComboBox()
+        self.combo_mode.addItems(["Series", "Movies"])
+        self.combo_mode.currentTextChanged.connect(self.update_template_placeholder)
+        top_layout.addWidget(QLabel("Mode:"))
+        top_layout.addWidget(self.combo_mode)
         
-        self.mode_var = tk.StringVar(value="series")
-        rb1 = ttk.Radiobutton(frame, text="TV Series (Organize by Season)", variable=self.mode_var, value="series")
-        rb1.pack(anchor='w', pady=2)
-        rb2 = ttk.Radiobutton(frame, text="Movies (Folder per Movie)", variable=self.mode_var, value="movies")
-        rb2.pack(anchor='w', pady=2)
-
-        # Path Selection
-        ttk.Separator(frame, orient='horizontal').pack(fill='x', pady=15)
+        # Template
+        top_layout.addWidget(QLabel("Template:"))
+        self.txt_template = QLineEdit()
+        self.txt_template.setText("{ShowName} - S{s:02}E{e:02}")
+        self.txt_template.setFixedWidth(250)
+        top_layout.addWidget(self.txt_template)
         
-        btn_browse = ttk.Button(frame, text="Select Folder to Organize", command=self.browse_folder)
-        btn_browse.pack(fill='x', pady=5)
-
-        self.lbl_path = ttk.Label(frame, text="No folder selected", foreground="gray")
-        self.lbl_path.pack(pady=5)
-
-        # Actions
-        ttk.Separator(frame, orient='horizontal').pack(fill='x', pady=15)
+        # Path
+        self.btn_browse = QPushButton("Select Folder")
+        self.btn_browse.setIcon(QIcon.fromTheme("folder-open"))
+        self.btn_browse.clicked.connect(self.browse_folder)
+        top_layout.addWidget(self.btn_browse)
         
-        self.chk_dry_run = tk.BooleanVar(value=False)
-        ttk.Checkbutton(frame, text="Dry Run (Simulate only)", variable=self.chk_dry_run).pack(anchor='w')
-
-        btn_run = ttk.Button(frame, text="START PROCESSING", command=self.run_process)
-        btn_run.pack(fill='x', pady=20)
-
-    def build_settings_tab(self, parent):
-        frame = ttk.Frame(parent, padding=20)
-        frame.pack(fill='both', expand=True)
+        self.lbl_path = QLabel("No folder selected")
+        self.lbl_path.setStyleSheet("color: #888; font-style: italic;")
+        top_layout.addWidget(self.lbl_path)
         
-        lbl = ttk.Label(frame, text="Conflict Action (Target file exists):")
-        lbl.pack(anchor='w')
+        top_layout.addStretch()
         
-        self.conflict_var = tk.StringVar(value="skip")
-        modes = [("Skip", "skip"), ("Overwrite", "overwrite"), ("Rename (Append Number)", "rename")]
-        for text, val in modes:
-            ttk.Radiobutton(frame, text=text, variable=self.conflict_var, value=val).pack(anchor='w')
+        # Scan Button
+        self.btn_scan = QPushButton("Scan / Preview")
+        self.btn_scan.clicked.connect(self.start_scan)
+        top_layout.addWidget(self.btn_scan)
 
-    def build_undo_tab(self, parent):
-        frame = ttk.Frame(parent, padding=20)
-        frame.pack(fill='both', expand=True)
+        layout.addWidget(config_frame)
 
-        lbl = ttk.Label(frame, text="Select a Backup Manifest (.json) to undo changes:")
-        lbl.pack(anchor='w', pady=10)
+        # 2. Main Table
+        self.tabs = QTabWidget()
+        layout.addWidget(self.tabs)
+        
+        # Preview Tab
+        self.tab_preview = QWidget()
+        preview_layout = QVBoxLayout(self.tab_preview)
+        
+        self.table = QTableWidget()
+        self.table.setColumnCount(4)
+        self.table.setHorizontalHeaderLabels(["Original Name", "New Name", "New Folder", "Status"])
+        self.table.horizontalHeader().setSectionResizeMode(1, QHeaderView.ResizeMode.Stretch)
+        self.table.horizontalHeader().setSectionResizeMode(2, QHeaderView.ResizeMode.ResizeToContents)
+        self.table.setSelectionBehavior(QTableWidget.SelectionBehavior.SelectRows)
+        preview_layout.addWidget(self.table)
+        
+        self.tabs.addTab(self.tab_preview, "Preview & Apply")
 
-        btn_browse_manifest = ttk.Button(frame, text="Load Manifest File", command=self.load_undo_manifest)
-        btn_browse_manifest.pack(fill='x')
+        # Undo Tab
+        self.tab_undo = QWidget()
+        undo_layout = QVBoxLayout(self.tab_undo)
+        
+        self.btn_load_manifest = QPushButton("Select Backup Manifest to Undo")
+        self.btn_load_manifest.clicked.connect(self.browse_manifest)
+        self.btn_load_manifest.setObjectName("Secondary")
+        undo_layout.addWidget(self.btn_load_manifest)
+        
+        self.lbl_manifest = QLabel("No manifest loaded")
+        undo_layout.addWidget(self.lbl_manifest)
+        
+        self.btn_perform_undo = QPushButton("Perform Undo")
+        self.btn_perform_undo.clicked.connect(self.start_undo)
+        self.btn_perform_undo.setEnabled(False)
+        self.btn_perform_undo.setStyleSheet("background-color: #a00; color: white;")
+        undo_layout.addWidget(self.btn_perform_undo)
+        undo_layout.addStretch()
+        
+        self.tabs.addTab(self.tab_undo, "Undo / Restore")
+
+        # 3. Bottom Bar
+        bottom_layout = QHBoxLayout()
+        self.progress = QProgressBar()
+        bottom_layout.addWidget(self.progress)
+        
+        self.btn_apply = QPushButton("APPLY CHANGES")
+        self.btn_apply.clicked.connect(self.start_apply)
+        self.btn_apply.setEnabled(False)
+        self.btn_apply.setStyleSheet("font-weight: bold; padding: 10px 30px;")
+        bottom_layout.addWidget(self.btn_apply)
+        
+        layout.addLayout(bottom_layout)
+
+    def update_template_placeholder(self, mode):
+        if mode == "Series":
+            self.txt_template.setText("{ShowName} - S{s:02}E{e:02}")
+        else:
+            self.txt_template.setText("{Title} ({Year})")
 
     def browse_folder(self):
-        d = filedialog.askdirectory()
+        d = QFileDialog.getExistingDirectory(self, "Select Folder")
         if d:
-            self.lbl_path.config(text=d, foreground="black")
-            self.selected_path = d
+            self.lbl_path.setText(d)
+            self.start_scan()
 
-    def run_process(self):
-        if not hasattr(self, 'selected_path'):
-            messagebox.showerror("Error", "Please select a folder first.")
-            return
-
-        mode = self.mode_var.get()
-        self.config["DRY_RUN"] = self.chk_dry_run.get()
-        self.config["CONFLICT_ACTION"] = self.conflict_var.get()
-
-        self.logger.log(f"Starting {mode.upper()} organization...", "black")
+    def start_scan(self):
+        path = self.lbl_path.text()
+        if not os.path.isdir(path): return
         
-        # Run in thread to keep GUI responsive
-        t = threading.Thread(target=self.process_thread, args=(mode, self.selected_path))
-        t.start()
-
-    def process_thread(self, mode, path):
-        logic_cls = SeriesLogic if mode == "series" else MovieLogic
-        logic = logic_cls(self.logger, self.config)
-        try:
-            logic.run(path)
-        except Exception as e:
-            self.logger.log(f"Critical Error: {e}", "red")
-
-    def load_undo_manifest(self):
-        f = filedialog.askopenfilename(filetypes=[("JSON Files", "*.json")])
-        if not f: return
+        self.btn_scan.setEnabled(False)
+        scanner = FileScanner(path, self.combo_mode.currentText(), self.txt_template.text())
         
-        try:
-            data = ManifestManager.load_manifest(f)
-            ops = data.get("operations", [])
+        self.worker = ScanWorker(scanner)
+        self.worker.finished.connect(self.on_scan_finished)
+        self.worker.start()
+
+    def on_scan_finished(self, results):
+        self.items = results
+        self.table.setRowCount(len(results))
+        self.btn_scan.setEnabled(True)
+        
+        for i, item in enumerate(results):
+            self.table.setItem(i, 0, QTableWidgetItem(item['original_name']))
+            self.table.setItem(i, 1, QTableWidgetItem(item['new_name']))
+            self.table.setItem(i, 2, QTableWidgetItem(item['folder']))
+            status_item = QTableWidgetItem(item['status'])
+            status_item.setForeground(QColor("#00ff00"))
+            self.table.setItem(i, 3, status_item)
             
-            if not ops:
-                messagebox.showinfo("Info", "Manifest is empty.")
-                return
+        if results:
+            self.btn_apply.setEnabled(True)
+            self.btn_apply.setText(f"APPLY ({len(results)} files)")
+        else:
+            self.btn_apply.setEnabled(False)
+            self.btn_apply.setText("APPLY")
 
-            confirm = messagebox.askyesno("Confirm Undo", f"Undo {len(ops)} operations from {data['timestamp']}?")
-            if not confirm: return
+    def start_apply(self):
+        # ESCAPED NEWLINE HERE: \\n
+        confirm = QMessageBox.question(self, "Confirm", "This will rename/move files. A backup manifest will be created.\\nContinue?", 
+                                       QMessageBox.StandardButton.Yes | QMessageBox.StandardButton.No)
+        if confirm != QMessageBox.StandardButton.Yes: return
 
-            self.logger.log(f"Restoring from {os.path.basename(f)}...", "orange")
-            
-            count = 0
-            # Reverse operations for undo
-            for op in reversed(ops):
-                src, dst = op['src'], op['dst']
-                if os.path.exists(dst):
-                    try:
-                        # Ensure src dir exists
-                        if not os.path.exists(os.path.dirname(src)):
-                            os.makedirs(os.path.dirname(src))
-                        
-                        shutil.move(dst, src)
-                        self.logger.log(f"Restored: {os.path.basename(src)}", "green")
-                        count += 1
-                    except Exception as e:
-                        self.logger.log(f"Failed to restore {os.path.basename(dst)}: {e}", "red")
-                else:
-                    self.logger.log(f"File missing for restore: {os.path.basename(dst)}", "red")
+        self.btn_apply.setEnabled(False)
+        self.table.setEnabled(False)
+        
+        self.apply_worker = ApplyWorker(self.items, self.lbl_path.text())
+        self.apply_worker.progress.connect(self.update_progress)
+        self.apply_worker.finished.connect(self.on_apply_finished)
+        self.apply_worker.start()
 
-            self.logger.log(f"Undo complete. {count} files restored.", "blue")
+    def update_progress(self, val, msg):
+        self.progress.setValue(val)
+        self.statusBar().showMessage(msg)
 
-        except Exception as e:
-            messagebox.showerror("Error", f"Failed to load manifest: {e}")
+    def on_apply_finished(self, manifest_path):
+        self.table.setEnabled(True)
+        self.progress.setValue(100)
+        # ESCAPED NEWLINE HERE: \\n
+        QMessageBox.information(self, "Success", f"Operation Complete!\\nManifest saved to:\\n{manifest_path}")
+        # Clear table
+        self.table.setRowCount(0)
+        self.items = []
+        self.btn_apply.setText("APPLY")
+
+    # --- UNDO LOGIC ---
+    def browse_manifest(self):
+        f, _ = QFileDialog.getOpenFileName(self, "Select Manifest", self.lbl_path.text(), "JSON Files (*.json)")
+        if f:
+            self.lbl_manifest.setText(f)
+            self.btn_perform_undo.setEnabled(True)
+
+    def start_undo(self):
+        path = self.lbl_manifest.text()
+        self.btn_perform_undo.setEnabled(False)
+        
+        self.undo_worker = UndoWorker(path)
+        self.undo_worker.progress.connect(self.update_progress)
+        self.undo_worker.finished.connect(self.on_undo_finished)
+        self.undo_worker.start()
+
+    def on_undo_finished(self):
+        self.progress.setValue(100)
+        QMessageBox.information(self, "Undo", "Undo operations completed.")
+        self.btn_perform_undo.setEnabled(True)
 
 if __name__ == "__main__":
-    root = tk.Tk()
-    app = JellySortApp(root)
-    root.mainloop()
+    app = QApplication(sys.argv)
+    app.setStyle("Fusion")
+    
+    # Adjust palette for dark theme if needed
+    palette = QPalette()
+    palette.setColor(QPalette.ColorRole.Window, QColor(53, 53, 53))
+    palette.setColor(QPalette.ColorRole.WindowText, Qt.GlobalColor.white)
+    app.setPalette(palette)
+    
+    window = MainWindow()
+    window.show()
+    sys.exit(app.exec())
 `;

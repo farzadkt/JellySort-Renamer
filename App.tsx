@@ -1,27 +1,28 @@
+
 import React from 'react';
 import Simulator from './components/Simulator';
 import ScriptViewer from './components/ScriptViewer';
-import { Tv, FolderGit2, Code2, MonitorPlay } from 'lucide-react';
+import { Tv, FolderGit2, Code2, MonitorPlay, AlertTriangle } from 'lucide-react';
 
 const App: React.FC = () => {
   return (
-    <div className="min-h-screen bg-slate-950 text-slate-200 font-sans selection:bg-emerald-500/30">
+    <div className="min-h-screen bg-[#1e1e1e] text-[#f0f0f0] font-sans selection:bg-[#007acc] selection:text-white">
       
       {/* Hero Section */}
-      <header className="border-b border-slate-800 bg-slate-900/50 backdrop-blur-sm sticky top-0 z-50">
+      <header className="border-b border-[#3e3e42] bg-[#252526] sticky top-0 z-50">
         <div className="max-w-6xl mx-auto px-4 py-4 flex items-center justify-between">
           <div className="flex items-center space-x-3">
-            <div className="bg-emerald-600 p-2 rounded-lg shadow-lg shadow-emerald-900/20">
+            <div className="bg-[#007acc] p-2 rounded shadow-lg">
               <Tv size={24} className="text-white" />
             </div>
             <div>
-              <h1 className="text-xl font-bold text-white tracking-tight">JellySort</h1>
-              <p className="text-xs text-slate-400">Windows 11 Series Organizer</p>
+              <h1 className="text-xl font-bold text-white tracking-tight">JellySort Modern</h1>
+              <p className="text-xs text-slate-400">Windows 11 PyQt6 Organizer</p>
             </div>
           </div>
           <div className="flex items-center space-x-4 text-sm font-medium">
-             <a href="#simulator" className="hover:text-emerald-400 transition-colors">Simulator</a>
-             <a href="#download" className="hover:text-emerald-400 transition-colors">Get Script</a>
+             <a href="#simulator" className="hover:text-[#007acc] transition-colors">Simulator</a>
+             <a href="#download" className="hover:text-[#007acc] transition-colors">Get Script</a>
           </div>
         </div>
       </header>
@@ -31,47 +32,54 @@ const App: React.FC = () => {
         {/* Intro */}
         <section className="text-center space-y-6 max-w-3xl mx-auto">
           <h2 className="text-4xl md:text-5xl font-extrabold text-white leading-tight">
-            Organize your library <br/>
-            <span className="text-transparent bg-clip-text bg-gradient-to-r from-emerald-400 to-cyan-400">
-              with a smart GUI.
-            </span>
+            Organize with <br/>
+            <span className="text-[#007acc]">Modern Precision.</span>
           </h2>
           <p className="text-lg text-slate-400">
-            A native <b>Windows GUI</b> Python tool. It features <b>Subtitle Support</b>, <b>Undo/Restore</b> via Manifest files, and automatic conflict handling. Rename your TV Series and Movies for Jellyfin/Plex compliance safely.
+            A native <b>PyQt6</b> Windows application generated for you. Features a <b>Data Grid Preview</b>, custom naming templates, <b>One-Click Undo</b>, and automatic subtitle handling.
           </p>
         </section>
 
         {/* Simulator */}
         <section id="simulator" className="space-y-6">
           <div className="flex items-center justify-center space-x-2 mb-8">
-            <FolderGit2 className="text-emerald-500" />
-            <h3 className="text-2xl font-bold text-white">Logic Simulator</h3>
+            <FolderGit2 className="text-[#007acc]" />
+            <h3 className="text-2xl font-bold text-white">Logic Preview</h3>
           </div>
           <p className="text-center text-slate-400 mb-8 max-w-2xl mx-auto">
-            Test the sorting logic below. The simulator previews how video files are handled.
+            This simulator runs the same pattern matching logic as the Python script.
             <br/>
-            <span className="text-xs text-emerald-400">* Note: The actual script also supports Subtitles (.srt) and Undo operations.</span>
+            Test your filenames and template before downloading.
           </p>
           <Simulator />
         </section>
 
         {/* Code Download */}
-        <section id="download" className="pt-10 border-t border-slate-800">
+        <section id="download" className="pt-10 border-t border-[#3e3e42]">
           <div className="flex flex-col items-center justify-center space-y-4 mb-8">
             <div className="flex items-center space-x-2">
-              <Code2 className="text-emerald-500" />
-              <h3 className="text-2xl font-bold text-white">The GUI Script</h3>
+              <Code2 className="text-[#007acc]" />
+              <h3 className="text-2xl font-bold text-white">The PyQt6 Script</h3>
             </div>
-            <div className="text-center text-slate-400 max-w-2xl bg-slate-900 p-6 rounded-xl border border-slate-800">
+            
+            <div className="w-full max-w-2xl bg-[#252526] p-4 rounded border border-[#3e3e42] flex items-start gap-3">
+                 <AlertTriangle className="text-yellow-500 shrink-0" size={20} />
+                 <div className="text-sm">
+                    <p className="font-bold text-white mb-1">Requirement: PyQt6</p>
+                    <p className="text-slate-400">This script uses a modern GUI framework. You must run this command in your terminal before starting the script:</p>
+                    <code className="block mt-2 bg-black px-2 py-1 rounded text-green-400 font-mono">pip install PyQt6</code>
+                 </div>
+            </div>
+
+            <div className="text-center text-slate-400 max-w-2xl bg-[#2d2d30] p-6 rounded-xl border border-[#3e3e42]">
               <div className="flex items-start justify-center space-x-4">
-                 <MonitorPlay className="text-emerald-400 mt-1 shrink-0" size={24} />
+                 <MonitorPlay className="text-[#007acc] mt-1 shrink-0" size={24} />
                  <div className="text-left space-y-2">
-                    <p className="text-white font-semibold">Native Windows Interface</p>
-                    <p className="text-sm">This script launches a real graphical window on your PC. No command line required.</p>
-                    <ul className="text-sm list-disc pl-4 space-y-1 text-slate-500">
-                        <li><b>Manifest/Undo:</b> Automatically saves a JSON backup to revert changes.</li>
-                        <li><b>Subtitles:</b> Moves .srt/.sub files alongside videos.</li>
-                        <li><b>Safe:</b> Use "Dry Run" to test before applying.</li>
+                    <p className="text-white font-semibold">Features</p>
+                    <ul className="text-sm list-disc pl-4 space-y-1 text-slate-400">
+                        <li><b>Preview Table:</b> See exactly what will happen before applying.</li>
+                        <li><b>Templating:</b> Customize naming (e.g., <code>&#123;ShowName&#125; - S&#123;s&#125;E&#123;e&#125;</code>).</li>
+                        <li><b>Safety:</b> Generates a backup manifest. Undo changes instantly.</li>
                     </ul>
                  </div>
               </div>
@@ -82,9 +90,9 @@ const App: React.FC = () => {
 
       </main>
 
-      <footer className="bg-slate-900 border-t border-slate-800 py-8 mt-20">
+      <footer className="bg-[#252526] border-t border-[#3e3e42] py-8 mt-20">
         <div className="max-w-6xl mx-auto px-4 text-center text-slate-500 text-sm">
-          <p>Generated by Google Gemini • Compatible with Windows 11 (Python 3.x)</p>
+          <p>Generated by Google Gemini • Requires Python 3.x & PyQt6</p>
         </div>
       </footer>
     </div>
